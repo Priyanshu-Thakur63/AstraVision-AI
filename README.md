@@ -151,14 +151,14 @@ predictions/
 
 ## 🙌 Team
 
-Made by **\[Your Name]** for **HackByte - Space Station Hackathon**
-With collaboration, simulation, and AI applied in synthetic environments.
+Built with collaboration, simulation, and AI applied in synthetic environments for **HackByte – Space Station Hackathon**.
 
----
+**Team Name:** BitWise-Cosmic 🚀
 
-## 🪪 License
-
-This project is under the [MIT License](LICENSE).
+- 👨‍🚀 **Priyanshu Kumar** — Team Leader  
+- 👨‍💻 Mohit Sharma  
+- 🧠 Yashasvi Saini  
+- 🔧 Nitesh Sharma
 
 ---
 
