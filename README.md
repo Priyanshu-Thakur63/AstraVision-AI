@@ -137,6 +137,7 @@ runs/                  # Contains training logs and weights
 predictions/
 ├── images/            # Annotated predictions
 └── labels/            # YOLO-format labels
+└── lib/            # App code
 ```
 
 ---
