@@ -1,0 +1,334 @@
+    import 'dart:io';
+    import 'dart:typed_data';
+    import 'package:flutter/material.dart';
+    import 'package:flutter/services.dart';
+    import 'package:image/image.dart' as img;
+    import 'package:image_picker/image_picker.dart';
+    import 'package:tflite_flutter/tflite_flutter.dart';
+
+    // Represents a single detection result for drawing and display
+    class Recognition {
+      final Rect location;
+      final String label;
+      final double score;
+      Recognition(this.location, this.label, this.score);
+    }
+
+    void main() {
+      runApp(const AstraVisionApp());
+    }
+
+    class AstraVisionApp extends StatelessWidget {
+      const AstraVisionApp({Key? key}) : super(key: key);
+
+      @override
+      Widget build(BuildContext context) {
+        return MaterialApp(
+          title: 'AstraVision AI',
+          theme: ThemeData.light().copyWith(
+            primaryColor: const Color(0xFF0C141C),
+            scaffoldBackgroundColor: const Color.fromARGB(255, 230, 235, 240),
+          ),
+          home: const Scaffold(
+            body: Center(
+              child: SingleChildScrollView(
+                child: AstraVisionDashboard(),
+              ),
+            ),
+          ),
+        );
+      }
+    }
+
+    class AstraVisionDashboard extends StatefulWidget {
+      const AstraVisionDashboard({Key? key}) : super(key: key);
+
+      @override
+      _AstraVisionDashboardState createState() => _AstraVisionDashboardState();
+    }
+
+    class _AstraVisionDashboardState extends State<AstraVisionDashboard> {
+      late Interpreter _interpreter;
+      late List<String> _labels;
+      File? _imageFile;
+      img.Image? _image;
+      List<Recognition>? _recognitions;
+      bool _isLoading = true;
+      String _statusMessage = "Loading AI model...";
+
+      // Constants for model
+      static const int INPUT_SIZE = 640;
+      static const double CONFIDENCE_THRESHOLD = 0.5;
+
+      @override
+      void initState() {
+        super.initState();
+        _loadModel();
+      }
+
+      Future<void> _loadModel() async {
+        try {
+          final interpreterOptions = InterpreterOptions();
+          _interpreter = await Interpreter.fromAsset('assets/best_float32.tflite', options: interpreterOptions);
+          
+          final labelsData = await rootBundle.loadString('assets/labels.txt');
+          _labels = labelsData.split('\n').where((label) => label.isNotEmpty).toList();
+
+          setState(() {
+            _isLoading = false;
+            _statusMessage = "Model loaded successfully. Please select an image.";
+          });
+        } catch (e) {
+          setState(() {
+            _isLoading = false;
+            _statusMessage = "Error: Failed to load AI model.";
+          });
+          print("Error loading model: $e");
+        }
+      }
+
+      Future<void> _pickImage() async {
+        final picker = ImagePicker();
+        final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+
+        if (pickedFile != null) {
+          _analyzeImage(File(pickedFile.path));
+        }
+      }
+
+      Future<void> _analyzeImage(File imageFile) async {
+        setState(() {
+          _isLoading = true;
+          _statusMessage = "Analyzing image...";
+          _imageFile = imageFile;
+          _recognitions = null;
+        });
+
+        final bytes = await imageFile.readAsBytes();
+        final image = img.decodeImage(bytes);
+        if (image == null) return;
+        
+        // Prepare image for the model
+        final imageInput = img.copyResize(image, width: INPUT_SIZE, height: INPUT_SIZE);
+        final imageMatrix = List.generate(
+          imageInput.height,
+          (y) => List.generate(
+            imageInput.width,
+            (x) {
+              final pixel = imageInput.getPixel(x, y);
+              return [pixel.rNormalized, pixel.gNormalized, pixel.bNormalized];
+            },
+          ),
+        );
+
+        final input = [imageMatrix];
+        // Output tensor shape is typically [1, 84, 8400] for YOLOv8 exports
+        final output = [List<List<double>>.filled(84, List<double>.filled(8400, 0.0))];
+
+        _interpreter.run(input, output);
+
+        // Post-process the output
+        final List<Recognition> recognitions = _postProcessOutput(output, image.width, image.height);
+
+        setState(() {
+          _image = image;
+          _recognitions = recognitions;
+          _isLoading = false;
+          _statusMessage = "${_recognitions?.length ?? 0} objects detected.";
+        });
+      }
+
+      List<Recognition> _postProcessOutput(List<dynamic> output, int originalWidth, int originalHeight) {
+          final scores = output[0].sublist(4);
+          final boxes = output[0].sublist(0, 4);
+
+          final List<Rect> rects = [];
+          final List<double> confidences = [];
+          final List<int> classIds = [];
+
+          for (int i = 0; i < boxes[0].length; i++) {
+            double maxScore = 0;
+            int maxClassId = -1;
+            for(int j = 0; j < scores.length; j++){
+                if (scores[j][i] > maxScore) {
+                    maxScore = scores[j][i];
+                    maxClassId = j;
+                }
+            }
+              
+            if (maxScore > CONFIDENCE_THRESHOLD) {
+                confidences.add(maxScore);
+                classIds.add(maxClassId);
+
+                final centerX = boxes[0][i] * (originalWidth / INPUT_SIZE);
+                final centerY = boxes[1][i] * (originalHeight / INPUT_SIZE);
+                final width = boxes[2][i] * (originalWidth / INPUT_SIZE);
+                final height = boxes[3][i] * (originalHeight / INPUT_SIZE);
+                final left = centerX - width / 2;
+                final top = centerY - height / 2;
+                rects.add(Rect.fromLTWH(left, top, width, height));
+            }
+          }
+          
+          final List<int> nmsResult = TfliteNms.nms(
+            boxes: rects.map((r) => [r.left, r.top, r.right, r.bottom]).toList(),
+            scores: confidences,
+            iouThreshold: 0.45,
+          );
+
+          final List<Recognition> recognitions = [];
+          for (int index in nmsResult) {
+              recognitions.add(Recognition(rects[index], _labels[classIds[index]], confidences[index]));
+          }
+          return recognitions;
+      }
+      
+      @override
+      Widget build(BuildContext context) {
+        return Container(
+          width: 1280,
+          padding: const EdgeInsets.symmetric(vertical: 20),
+          decoration: BoxDecoration(color: const Color(0xFFF7F9FC)),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildHeader(),
+              const SizedBox(height: 20),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(flex: 3, child: _buildControlPanel()),
+                    const SizedBox(width: 24),
+                    Expanded(flex: 2, child: _buildResultsPanel()),
+                  ],
+                ),
+              )
+            ],
+          ),
+        );
+      }
+
+      Widget _buildHeader() => Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 12),
+            decoration: const ShapeDecoration(shape: RoundedRectangleBorder(side: BorderSide(width: 1, color: Color(0xFFE5E8EA)))),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('AstraVision AI', style: TextStyle(color: Color(0xFF0C141C), fontSize: 18, fontFamily: 'Space Grotesk', fontWeight: FontWeight.w700)),
+              ],
+            ),
+      );
+
+      Widget _buildControlPanel() => Column(
+            children: [
+              Container(
+                height: 500, // Fixed height for the previewer
+                decoration: ShapeDecoration(shape: RoundedRectangleBorder(side: const BorderSide(width: 2, color: Color(0xFFCEDBE8)), borderRadius: BorderRadius.circular(12))),
+                child: ClipRRect( // Clip the content to the rounded border
+                    borderRadius: BorderRadius.circular(11), // Slightly less than the container
+                    child: _isLoading
+                      ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [CircularProgressIndicator(), SizedBox(height: 10), Text(_statusMessage)]))
+                      : (_imageFile == null)
+                        ? Center(child: Text(_statusMessage, textAlign: TextAlign.center))
+                        : CustomPaint(
+                            foregroundPainter: BoundingBoxPainter(recognitions: _recognitions ?? [], originalImageWidth: _image!.width.toDouble(), originalImageHeight: _image!.height.toDouble()),
+                            child: Image.file(_imageFile!, fit: BoxFit.contain),
+                        )
+                ),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton.icon(
+                onPressed: _isLoading ? null : _pickImage,
+                icon: const Icon(Icons.image_search),
+                label: const Text('Pick Image From Files'),
+                style: ElevatedButton.styleFrom(
+                    primary: Color(0xFF3D99F4),
+                    onPrimary: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
+                    textStyle: const TextStyle(fontSize: 16)
+                ),
+              )
+            ],
+          );
+
+      Widget _buildResultsPanel() => Column(
+            children: [
+              const Text('Detection Results', style: TextStyle(color: Color(0xFF0C141C), fontSize: 22, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 12),
+              Container(
+                height: 540,
+                decoration: ShapeDecoration(
+                  color: Colors.white,
+                  shape: RoundedRectangleBorder(side: const BorderSide(width: 1, color: Color(0xFFCEDBE8)), borderRadius: BorderRadius.circular(12)),
+                ),
+                child: (_recognitions == null || _recognitions!.isEmpty)
+                  ? Center(child: Text(_isLoading ? " " : "No objects detected or all are below threshold.", textAlign: TextAlign.center,))
+                  : ListView(
+                    children: [
+                       Padding(
+                         padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+                         child: Row(children: const [
+                            Expanded(flex: 3, child: Text('Class', style: TextStyle(fontWeight: FontWeight.bold))),
+                            Expanded(flex: 2, child: Text('Confidence', style: TextStyle(fontWeight: FontWeight.bold))),
+                         ]),
+                       ),
+                       Divider(),
+                       ..._recognitions!.map((recog) => Padding(
+                         padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                         child: Row(children: [
+                           Expanded(flex: 3, child: Text(recog.label)),
+                           Expanded(flex: 2, child: Text('${(recog.score * 100).toStringAsFixed(1)}%')),
+                         ]),
+                       )).toList(),
+                    ],
+                  )
+              ),
+            ],
+          );
+    }
+
+    // CustomPainter to draw bounding boxes over the image
+    class BoundingBoxPainter extends CustomPainter {
+        final List<Recognition> recognitions;
+        final double originalImageWidth;
+        final double originalImageHeight;
+
+        BoundingBoxPainter({required this.recognitions, required this.originalImageWidth, required this.originalImageHeight});
+
+        @override
+        void paint(Canvas canvas, Size size) {
+            final double scaleX = size.width / originalImageWidth;
+            final double scaleY = size.height / originalImageHeight;
+            
+            final paint = Paint()
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = 2.0
+                ..color = Colors.redAccent;
+
+            for (final recognition in recognitions) {
+                final rect = Rect.fromLTWH(
+                    recognition.location.left * scaleX,
+                    recognition.location.top * scaleY,
+                    recognition.location.width * scaleX,
+                    recognition.location.height * scaleY,
+                );
+                canvas.drawRect(rect, paint);
+                
+                final textPainter = TextPainter(
+                    text: TextSpan(
+                        text: '${recognition.label} ${(recognition.score * 100).toStringAsFixed(0)}%',
+                        style: TextStyle(backgroundColor: Colors.redAccent, color: Colors.white, fontSize: 12),
+                    ),
+                    textDirection: TextDirection.ltr,
+                );
+                textPainter.layout();
+                textPainter.paint(canvas, rect.topLeft - const Offset(0, 14));
+            }
+        }
+
+        @override
+        bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+    }
